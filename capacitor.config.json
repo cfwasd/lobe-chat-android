@@ -5,11 +5,15 @@
   "bundledWebRuntime": false,
   "server": {
     "url": "https://chat.wangziheng.vip",
-    "cleartext": true
+    "cleartext": true,
+    "allowNavigation": [
+      "chat.wangziheng.vip",
+      "*.wangziheng.vip"
+    ]
   },
   "android": {
     "allowMixedContent": true,
     "captureInput": true,
-    "webContentsDebuggingEnabled": false
+    "webContentsDebuggingEnabled": true
   }
 }
