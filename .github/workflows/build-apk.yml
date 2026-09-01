@@ -38,8 +38,13 @@ jobs:
         run: |
           npx cap add android
 
-      - name: Inject Background Permissions
+      - name: Configure ARM64 ABI & Background Permissions
         run: |
+          # 1. 显式锁定纯 64 位 ARM 芯片架构，避免系统 dex2oat 安装卡死
+          GRADLE_FILE="android/app/build.gradle"
+          sed -i '/defaultConfig {/a \        ndk {\n            abiFilters "arm64-v8a"\n        }' $GRADLE_FILE
+
+          # 2. 注入后台与保活权限
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />' $MANIFEST
 
@@ -47,31 +52,29 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleRelease || ./gradlew assembleDebug
 
-      - name: Sign APK with Android apksigner (v2/v3 support)
+      - name: Sign APK with apksigner (v2/v3 support)
         run: |
           RAW_APK=$(find android/app/build/outputs/apk/ -name "*.apk" | head -n 1)
           echo "Found APK: $RAW_APK"
 
-          # 生成标准安卓签名密钥
           keytool -genkeypair -v -keystore release.keystore -alias lobechat -keyalg RSA -keysize 2048 -validity 10000 -storepass 123456 -keypass 123456 -dname "CN=LobeChat, OU=App, O=Lobe, L=SH, ST=SH, C=CN"
 
-          # 找到 Android SDK 里的 build-tools 工具链 (zipalign & apksigner)
           BUILD_TOOLS_PATH=$(ls -d $ANDROID_HOME/build-tools/* | tail -n 1)
           echo "Using build tools from: $BUILD_TOOLS_PATH"
 
-          # 1. 4字节对齐 (zipalign)
+          # 4 字节对齐
           $BUILD_TOOLS_PATH/zipalign -v -p 4 "$RAW_APK" aligned.apk
 
-          # 2. 官方 apksigner 签名 (启用 v2, v3 签名，任何手机都能秒识别)
+          # v2/v3 签名
           $BUILD_TOOLS_PATH/apksigner sign --ks release.keystore --ks-key-alias lobechat --ks-pass pass:123456 --key-pass pass:123456 --out final-lobechat.apk aligned.apk
 
-          # 3. 验证签名有效性
+          # 校验
           $BUILD_TOOLS_PATH/apksigner verify --verbose final-lobechat.apk
 
-      - name: Upload Valid Signed APK
+      - name: Upload ARM64 APK
         uses: actions/upload-artifact@v4
         with:
-          name: LobeChat-WangZiHeng-Valid-APK
+          name: LobeChat-ARM64-Optimized-APK
           path: final-lobechat.apk
