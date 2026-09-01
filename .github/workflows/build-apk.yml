@@ -1,6 +1,8 @@
 name: Build Android APK
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -23,11 +25,14 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Capacitor & Generate Android Project
+      - name: Install Dependencies
         run: |
           mkdir -p out
           echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>LobeChat</title></head><body><script>window.location.href="https://chat.wangziheng.vip";</script></body></html>' > out/index.html
-          npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest
+          npm install
+
+      - name: Add Android Platform
+        run: |
           npx cap add android
 
       - name: Inject Background & Network Permissions
