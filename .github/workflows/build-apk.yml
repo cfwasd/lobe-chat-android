@@ -34,6 +34,8 @@ jobs:
           echo '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="background:#000;"></body></html>' > out/index.html
           npm install @capacitor/core @capacitor/cli @capacitor/android
 
+          # 关键：通过 allowNavigation 放行你的主站与 Logto 认证端
+          # 杜绝页面跳转外部系统浏览器，确保 state Cookie 在同一个 WebView 沙箱内闭环
           cat << 'EOF' > capacitor.config.json
           {
             "appId": "vip.wangziheng.lobechat",
@@ -42,7 +44,14 @@ jobs:
             "server": {
               "url": "https://chat.wangziheng.vip",
               "cleartext": true,
-              "androidScheme": "https"
+              "androidScheme": "https",
+              "allowNavigation": [
+                "chat.wangziheng.vip",
+                "*.wangziheng.vip",
+                "hfzb8t.logto.app",
+                "*.logto.app",
+                "*"
+              ]
             }
           }
           EOF
@@ -52,18 +61,19 @@ jobs:
           npx cap add android
           npx cap sync android
 
-      - name: Configure Android Permissions, Caching & Build Settings
+      - name: Configure Android Permissions, Caching & OIDC WebView Handlers
         run: |
           # 1. 显式锁定纯 64 位 ARM 架构
           GRADLE_FILE="android/app/build.gradle"
           sed -i '/defaultConfig {/a \        ndk {\n            abiFilters "arm64-v8a"\n        }' $GRADLE_FILE
 
-          # 2. 注入权限与明文传输配置
+          # 2. 注入核心权限与明文传输配置
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' $MANIFEST
           sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />' $MANIFEST
 
-          # 3. 动态定位并重写 MainActivity.java (离线缓存、DOM 存储与持久化)
+          # 3. 动态定位并重写 MainActivity.java
+          # 开启 WebView 内部拦截、Cookie 持久化刷盘与本地激进缓存
           MAIN_ACTIVITY=$(find android/app/src/main/java/ -name "MainActivity.java" | head -n 1)
           PACKAGE_NAME=$(grep "^package " "$MAIN_ACTIVITY" | head -n 1)
 
@@ -73,6 +83,8 @@ jobs:
           import android.os.Bundle;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.webkit.WebResourceRequest;
           import android.webkit.CookieManager;
           import com.getcapacitor.BridgeActivity;
 
@@ -91,16 +103,27 @@ jobs:
                       settings.setUseWideViewPort(true);
                       settings.setLoadWithOverviewMode(true);
 
-                      // 激进本地缓存策略 (优先本地秒开)
+                      // 激进本地缓存策略：首次下载，后续优先读取手机本地磁盘
                       settings.setCacheMode(WebSettings.LOAD_DEFAULT);
                       settings.setAllowFileAccess(true);
                       settings.setAllowContentAccess(true);
 
-                      // 跨域混合加载与 Cookie 保证
+                      // 跨域混合加载与 Cookie 隔离防御 (解决 OIDC state_mismatch 的关键)
                       settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
                       CookieManager cookieManager = CookieManager.getInstance();
                       cookieManager.setAcceptCookie(true);
                       cookieManager.setAcceptThirdPartyCookies(webView, true);
+
+                      // 强化拦截器：严禁任何第三方域名跳出到系统外部浏览器，并在每次跳转时强制将 Cookie 刷盘写入
+                      webView.setWebViewClient(new WebViewClient() {
+                          @Override
+                          public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                              String targetUrl = request.getUrl().toString();
+                              view.loadUrl(targetUrl);
+                              CookieManager.getInstance().flush();
+                              return false;
+                          }
+                      });
                   } catch (Exception e) {
                       e.printStackTrace();
                   }
@@ -112,12 +135,10 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          # 编译正式 Release 产物
           ./gradlew assembleRelease --stacktrace
 
       - name: Align & Sign Release APK (v2/v3 Signature)
         run: |
-          # 查找生成的 release 未签名 APK
           RAW_APK=$(find android/app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
           echo "Found Unsigned Release APK: $RAW_APK"
 
@@ -129,7 +150,7 @@ jobs:
 
           BUILD_TOOLS_PATH=$(ls -d $ANDROID_HOME/build-tools/* | tail -n 1)
 
-          # 1. 4 字节边界对齐
+          # 1. 4 字节对齐
           $BUILD_TOOLS_PATH/zipalign -v -p 4 "$RAW_APK" aligned-release.apk
 
           # 2. 执行正式发布签名 (启用 V2 + V3 签名机制)
