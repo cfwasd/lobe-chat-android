@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build LobeChat Android APK (Offline Assets)
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build LobeChat APK
+    name: Build Offline LobeChat APK
     runs-on: ubuntu-latest
 
     steps:
@@ -28,46 +28,61 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Prepare Frontend Assets
+      - name: Pull Full Static Assets from VPS
         run: |
-          npm install
-          # 方案 A (纯离线秒开)：如果有完整前端源码并配置了静态导出
-          # npm run build 
-          
-          # 方案 B (轻量壳模式)：如果暂无全量静态包，直接让 Capacitor 指向远程
-          # 确保根目录存在合法的 capacitor.config.json
+          mkdir -p out
+          cd out
+
+          # 1. 递归镜像抓取搬瓦工站点上的全量前端静态资源 (_next 目录、静态文件、favicon 等)
+          wget -q -r -np -nH --cut-dirs=0 \
+            --reject="html" \
+            https://chat.wangziheng.vip/_next/ || true
+
+          # 2. 抓取首页 HTML 并重命名为 index.html
+          curl -sL https://chat.wangziheng.vip -o index.html
+
+          # 3. 将 HTML 中绝对路径的 _next 替换为相对路径，确保本地 WebView (file:/// 或 http://localhost) 能精准命中
+          sed -i 's|/_next/|_next/|g' index.html
+
+          cd ..
+          echo "=== 静态资源抓取完成，当前资源大小： ==="
+          du -sh out/
+
+      - name: Setup Capacitor Configuration
+        run: |
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+
+          # 配置纯本地模式，不设置 server.url，完全从本地 webDir 加载
           cat << 'EOF' > capacitor.config.json
           {
             "appId": "vip.wangziheng.lobechat",
             "appName": "LobeChat",
             "webDir": "out",
             "server": {
-              "url": "https://chat.wangziheng.vip",
               "cleartext": true,
               "androidScheme": "https"
             }
           }
           EOF
-          mkdir -p out
-          echo '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="background:#000;"></body></html>' > out/index.html
 
-      - name: Add Android Platform & Sync
+      - name: Add Android Platform & Sync Assets
         run: |
           npx cap add android
+          # 同步 out 目录里的完整静态文件到 Android assets 中
           npx cap sync android
 
-      - name: Configure Android Permissions & Build Settings
+      - name: Configure Android Permissions & WebView Settings
         run: |
-          # 1. 显式锁定纯 64 位 ARM 芯片架构
+          # 1. 锁定 arm64-v8a 架构
           GRADLE_FILE="android/app/build.gradle"
           sed -i '/defaultConfig {/a \        ndk {\n            abiFilters "arm64-v8a"\n        }' $GRADLE_FILE
 
-          # 2. 注入网络权限与明文传输放行
+          # 2. 注入权限与明文传输支持
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' $MANIFEST
-          sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />' $MANIFEST
+          sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />' $MANIFEST
 
-          # 3. 动态定位并重写 MainActivity.java
+          # 3. 配置 MainActivity 开启 DOM Storage、数据库和跨域混合加载
           MAIN_ACTIVITY=$(find android/app/src/main/java/ -name "MainActivity.java" | head -n 1)
           PACKAGE_NAME=$(grep "^package " "$MAIN_ACTIVITY" | head -n 1)
 
@@ -105,7 +120,7 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --stacktrace
 
-      - name: Sign APK with apksigner (v2/v3 support)
+      - name: Sign APK with apksigner
         run: |
           RAW_APK=$(find android/app/build/outputs/apk/ -name "*.apk" | head -n 1)
           echo "Found APK: $RAW_APK"
@@ -114,14 +129,14 @@ jobs:
 
           BUILD_TOOLS_PATH=$(ls -d $ANDROID_HOME/build-tools/* | tail -n 1)
 
-          # 4 字节对齐
           $BUILD_TOOLS_PATH/zipalign -v -p 4 "$RAW_APK" aligned.apk
-
-          # 签名
           $BUILD_TOOLS_PATH/apksigner sign --ks release.keystore --ks-key-alias lobechat --ks-pass pass:123456 --key-pass pass:123456 --out final-lobechat.apk aligned.apk
 
-      - name: Upload APK
+          echo "=== 最终 APK 体积： ==="
+          ls -lh final-lobechat.apk
+
+      - name: Upload Final APK
         uses: actions/upload-artifact@v4
         with:
-          name: LobeChat-ARM64-APK
+          name: LobeChat-Offline-ARM64-APK
           path: final-lobechat.apk
