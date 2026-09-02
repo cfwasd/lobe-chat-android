@@ -28,38 +28,55 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Dependencies
+      - name: Prepare Frontend Assets
         run: |
-          mkdir -p out
-          echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>LobeChat</title></head><body><script>window.location.href="https://chat.wangziheng.vip";</script></body></html>' > out/index.html
           npm install
+          # 方案 A (纯离线秒开)：如果有完整前端源码并配置了静态导出
+          # npm run build 
+          
+          # 方案 B (轻量壳模式)：如果暂无全量静态包，直接让 Capacitor 指向远程
+          # 确保根目录存在合法的 capacitor.config.json
+          cat << 'EOF' > capacitor.config.json
+          {
+            "appId": "vip.wangziheng.lobechat",
+            "appName": "LobeChat",
+            "webDir": "out",
+            "server": {
+              "url": "https://chat.wangziheng.vip",
+              "cleartext": true,
+              "androidScheme": "https"
+            }
+          }
+          EOF
+          mkdir -p out
+          echo '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="background:#000;"></body></html>' > out/index.html
 
-      - name: Add Android Platform
+      - name: Add Android Platform & Sync
         run: |
           npx cap add android
+          npx cap sync android
 
-      - name: Configure Android Permissions & Allow Cleartext Traffic
+      - name: Configure Android Permissions & Build Settings
         run: |
           # 1. 显式锁定纯 64 位 ARM 芯片架构
           GRADLE_FILE="android/app/build.gradle"
           sed -i '/defaultConfig {/a \        ndk {\n            abiFilters "arm64-v8a"\n        }' $GRADLE_FILE
 
-          # 2. 开启 Cleartext 信任与后台保活权限
+          # 2. 注入网络权限与明文传输放行
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' $MANIFEST
           sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />' $MANIFEST
 
-          # 3. 增强 MainActivity：开启 DOM 存储、宽屏视图与 JavaScript 权限，确保 Next.js/LobeChat 完整加载
-          MAIN_ACTIVITY="android/app/src/main/java/vip/wangziheng/lobechat/MainActivity.java"
-          cat << "EOF" > $MAIN_ACTIVITY
-          package vip.wangziheng.lobechat;
+          # 3. 动态定位并重写 MainActivity.java
+          MAIN_ACTIVITY=$(find android/app/src/main/java/ -name "MainActivity.java" | head -n 1)
+          PACKAGE_NAME=$(grep "^package " "$MAIN_ACTIVITY" | head -n 1)
+
+          cat << EOF > "$MAIN_ACTIVITY"
+          $PACKAGE_NAME
 
           import android.os.Bundle;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
-          import android.webkit.SslErrorHandler;
-          import android.net.http.SslError;
-          import android.webkit.WebViewClient;
           import com.getcapacitor.BridgeActivity;
 
           public class MainActivity extends BridgeActivity {
@@ -76,18 +93,17 @@ jobs:
                       settings.setLoadWithOverviewMode(true);
                       settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
                   } catch (Exception e) {
-                      e.printStackTrace HARD;
+                      e.printStackTrace();
                   }
               }
           }
           EOF
-          sed -i 's/e.printStackTrace HARD;/e.printStackTrace();/' $MAIN_ACTIVITY
 
       - name: Build APK via Gradle
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --stacktrace
 
       - name: Sign APK with apksigner (v2/v3 support)
         run: |
@@ -104,8 +120,8 @@ jobs:
           # 签名
           $BUILD_TOOLS_PATH/apksigner sign --ks release.keystore --ks-key-alias lobechat --ks-pass pass:123456 --key-pass pass:123456 --out final-lobechat.apk aligned.apk
 
-      - name: Upload White-Screen Fixed APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LobeChat-WhiteScreen-Fixed-APK
+          name: LobeChat-ARM64-APK
           path: final-lobechat.apk
